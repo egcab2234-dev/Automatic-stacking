@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>混凝土預拌機械裝車疊貨自動評估系統 v7.0 — 管理員權限 / Firebase 即時同步 / 多重中空位 / 重量排序</title>
+<title>混凝土預拌機械裝車疊貨自動評估系統 v8.0 — 高度貼合車型選擇 / 管理員權限 / Firebase 即時同步 / 多重中空位 / 重量排序</title>
 <style>
 :root {
   --primary:#1a2b4a; --primary-light:#2d4a7a; --primary-lighter:#3d5f9a;
@@ -233,7 +233,7 @@ body.admin-mode .admin-locked-tip{display:none}
     <span class="admin-badge locked" id="adminBadge" onclick="openAdminModal()" title="管理員權限">🔒 一般模式</span>
     <span class="sync-status unsynced" id="syncStatusBtn" onclick="openSyncModal()" title="Firebase 即時雲端資料庫">🔥 連線中...</span>
     <button class="btn btn-ghost" onclick="window.print()" style="color:#fff;border-color:rgba(255,255,255,.3)" id="printBtn">🖨️ 列印報表</button>
-    <span class="version-badge">v7.0</span>
+    <span class="version-badge">v8.0</span>
   </div>
 </div>
 
@@ -1671,12 +1671,16 @@ function getVehicleCandidates(item, mode, fixedCode, allowOversize){
   if(mode==='fixed' && fixedCode) list = list.filter(v=>v.code===fixedCode);
   const fitting = list.filter(v => item.h <= v.h && item.wt <= v.maxWt && getItemOrientations(item).some(o=>o.l<=v.l && o.w<=v.w));
   const candidates = fitting.length ? fitting : (allowOversize ? list.filter(v=>item.h <= v.h*1.2 && item.wt <= v.maxWt*1.1) : []);
+  // 高度貼合度：v.h - item.h 越小越貼合
+  const heightDiff = (v) => Math.max(0, (v.h||0) - (item.h||0));
   if(mode==='prefer_large'){
-    candidates.sort((a,b)=> (b.l*b.w - a.l*a.w) || (b.maxWt-a.maxWt) || ((a.cost||0)-(b.cost||0)) );
+    candidates.sort((a,b)=> (b.l*b.w - a.l*a.w) || (b.maxWt-a.maxWt) || ((a.cost||0)-(b.cost||0)) || (heightDiff(a)-heightDiff(b)) );
   } else if(mode==='prefer_small'){
-    candidates.sort((a,b)=> ((a.cost||0)-(b.cost||0)) || ((a.l*a.w)-(b.l*b.w)) || (a.maxWt-b.maxWt));
+    // 成本優先 → 高度貼合 → 平面小 → 載重小
+    candidates.sort((a,b)=> ((a.cost||0)-(b.cost||0)) || (heightDiff(a)-heightDiff(b)) || ((a.l*a.w)-(b.l*b.w)) || (a.maxWt-b.maxWt));
   } else {
-    candidates.sort((a,b)=> ((a.cost||0)-(b.cost||0)) || ((a.l*a.w)-(b.l*b.w)) || (a.maxWt-b.maxWt));
+    // auto: 同上
+    candidates.sort((a,b)=> ((a.cost||0)-(b.cost||0)) || (heightDiff(a)-heightDiff(b)) || ((a.l*a.w)-(b.l*b.w)) || (a.maxWt-b.maxWt));
   }
   return candidates;
 }
@@ -1689,7 +1693,14 @@ function chooseBestTruckForNewItem(item, mode, fixedCode, allowOversize){
     const spot = evaluateFloorPlacement(tempTruck, item, allowOversize);
     if(!spot) continue;
     const oversizePenalty = spot.oversize ? 1000000 : 0;
-    const score = (v.cost||0) + oversizePenalty + (v.l*v.w - spot.l*spot.w)*0.00001;
+    const areaWaste = (v.l*v.w - spot.l*spot.w);
+    // 高度浪費懲罰：每浪費 1mm 高度視為 1.5 元成本
+    // 例：設備 h=2400, V06 h=3200 → 浪費 800mm = 懲罰 1200 元
+    //     設備 h=2400, V02 h=2500 → 浪費 100mm = 懲罰 150 元
+    // 在裝得下的前提下，選擇高度浪費較少的車型可大幅降低成本
+    const heightWaste = Math.max(0, (v.h||0) - (item.h||0));
+    const heightPenalty = heightWaste * 1.5;
+    const score = (v.cost||0) + oversizePenalty + areaWaste*0.00001 + heightPenalty;
     if(!best || score < best.score) best = {vehicle:v, spot, score};
   }
   return best;
@@ -1719,7 +1730,10 @@ function runFFD(items, mode, fixedCode, allowOversize){
       trucks.forEach((truck, truckIdx)=>{
         const candidate = evaluateFloorPlacement(truck, item, false);
         if(candidate){
-          const score = candidate.score + (truck.vehicle.cost||0)*0.01;
+          // 既有車輛若高度遠超過此物品，視為輕微浪費懲罰，
+          // 避免把低物件塞進高大車輛而拉高整體車隊成本
+          const heightWaste = Math.max(0, (truck.vehicle.h||0) - (item.h||0));
+          const score = candidate.score + (truck.vehicle.cost||0)*0.01 + heightWaste*0.05;
           if(!bestFloor || score < bestFloor.score) bestFloor = {truckIdx, candidate, score};
         }
       });
