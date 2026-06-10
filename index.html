@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>混凝土預拌機械裝車疊貨自動評估系統 v8.0 — 高度貼合車型選擇 / 管理員權限 / Firebase 即時同步 / 多重中空位 / 重量排序</title>
+<title>混凝土預拌機械裝車疊貨自動評估系統 v9.0-中空尺寸修正 — 高度貼合車型選擇 / 管理員權限 / Firebase 即時同步 / 多重中空位 / 重量排序</title>
 <style>
 :root {
   --primary:#1a2b4a; --primary-light:#2d4a7a; --primary-lighter:#3d5f9a;
@@ -233,7 +233,7 @@ body.admin-mode .admin-locked-tip{display:none}
     <span class="admin-badge locked" id="adminBadge" onclick="openAdminModal()" title="管理員權限">🔒 一般模式</span>
     <span class="sync-status unsynced" id="syncStatusBtn" onclick="openSyncModal()" title="Firebase 即時雲端資料庫">🔥 連線中...</span>
     <button class="btn btn-ghost" onclick="window.print()" style="color:#fff;border-color:rgba(255,255,255,.3)" id="printBtn">🖨️ 列印報表</button>
-    <span class="version-badge">v8.0</span>
+    <span class="version-badge">v9.0-中空尺寸修正</span>
   </div>
 </div>
 
@@ -1514,20 +1514,57 @@ function getItemOrientations(item){
   return options;
 }
 
+function getHostCavities(host){
+  return host.cavities || (host.cavity ? [host.cavity] : []);
+}
+
+function getEffectiveCavityDims(host, cavity){
+  return host.rotated
+    ? { l: cavity.w, w: cavity.l, h: cavity.h }
+    : { l: cavity.l, w: cavity.w, h: cavity.h };
+}
+
+function getCavityLayouts(host){
+  const cavities = getHostCavities(host);
+  if(!cavities.length) return [];
+  const gap = 50; // mm，僅用於同一設備多個中空位的視覺/模擬分隔
+  const dims = cavities.map((cavity, idx)=>({
+    cavity,
+    idx,
+    ...getEffectiveCavityDims(host, cavity)
+  }));
+  const totalLen = dims.reduce((sum, d)=>sum + d.l, 0) + Math.max(0, dims.length - 1) * gap;
+  let cursor = Math.max(0, (host.l - totalLen) / 2);
+  return dims.map(d=>{
+    const layout = {
+      idx: d.idx,
+      cavity: d.cavity,
+      l: d.l,
+      w: d.w,
+      h: d.h,
+      xOffset: cursor,
+      yOffset: Math.max(0, (host.w - d.w) / 2)
+    };
+    cursor += d.l + gap;
+    return layout;
+  });
+}
+
 function evaluateCavityPlacement(truck, item){
   let best = null;
   for(const host of truck.loadedItems){
     if(host.inCavity) continue;
-    const hostCavities = host.cavities || (host.cavity ? [host.cavity] : []);
-    for(const cavity of hostCavities){
-      const remainLen = cavity.l - cavity.usedLength;
+    const cavityLayouts = getCavityLayouts(host);
+    for(const layout of cavityLayouts){
+      const cavity = layout.cavity;
+      const remainLen = layout.l - cavity.usedLength;
       const remainWt = cavity.maxWt - cavity.usedWeight;
       for(const o of getItemOrientations(item)){
-        const fits = o.l <= remainLen && o.w <= cavity.w && item.h <= cavity.h && item.wt <= remainWt;
+        const fits = o.l <= remainLen && o.w <= layout.w && item.h <= layout.h && item.wt <= remainWt;
         if(!fits) continue;
-        const score = (remainLen - o.l) + ((remainWt - item.wt) * 0.001) + host.x * 0.0001;
+        const score = (remainLen - o.l) + ((remainWt - item.wt) * 0.001) + (host.x + layout.xOffset) * 0.0001;
         if(!best || score < best.score){
-          best = { host, cavity, cavityIdx: hostCavities.indexOf(cavity), l:o.l, w:o.w, rotated:o.rotated, score };
+          best = { host, cavity, cavityIdx: layout.idx, cavityLayout: layout, l:o.l, w:o.w, rotated:o.rotated, score };
         }
       }
     }
@@ -1536,12 +1573,13 @@ function evaluateCavityPlacement(truck, item){
 }
 
 function placeInCavity(truck, item, candidate){
-  const {host, cavity, l, w, rotated} = candidate;
+  const {host, cavity, cavityIdx, cavityLayout, l, w, rotated} = candidate;
+  const layout = cavityLayout || getCavityLayouts(host).find(c=>c.idx===cavityIdx) || getCavityLayouts(host)[0] || {xOffset:0, yOffset:0, l:cavity.l, w:cavity.w, h:cavity.h};
   const placement = {
     instanceId: item.instanceId,
     item,
-    x: host.x + cavity.usedLength,
-    y: host.y + Math.max(0, (host.w - cavity.w) / 2),
+    x: host.x + layout.xOffset + cavity.usedLength,
+    y: host.y + layout.yOffset + Math.max(0, (layout.w - w) / 2),
     l,
     w,
     rotated,
@@ -1551,6 +1589,8 @@ function placeInCavity(truck, item, candidate){
     cavityHostInstanceId: host.instanceId,
     cavityHostCode: host.item.code,
     cavityHostName: host.item.name,
+    cavityIdx,
+    cavityId: cavity.id,
     cavityX: cavity.usedLength,
     overW: 0,
     overH: 0,
@@ -1994,14 +2034,13 @@ function drawTopView(tidx, truck){
     ctx.lineWidth=1.5;
     ctx.strokeRect(ix,iy,drawIW,drawIH);
 
-    const liCavities = li.cavities || (li.cavity ? [li.cavity] : []);
-    if(liCavities.length){
-      let cavOffsetX = 0;
-      liCavities.forEach((cav, ci)=>{
-        const cavX = ix + Math.max(2, ((li.item.l - cav.l) / 2) * scale) + cavOffsetX;
-        const cavY = iy + Math.max(2, ((li.w - cav.w) * scale) / 2);
-        const cavW = Math.max(8, cav.l * scale);
-        const cavH = Math.max(8, cav.w * scale);
+    const cavityLayouts = getCavityLayouts(li);
+    if(cavityLayouts.length){
+      cavityLayouts.forEach((layout, ci)=>{
+        const cavX = ix + layout.xOffset * scale;
+        const cavY = iy + layout.yOffset * scale;
+        const cavW = Math.max(8, layout.l * scale);
+        const cavH = Math.max(8, layout.w * scale);
         ctx.save();
         ctx.setLineDash([5,3]);
         ctx.strokeStyle='#ffffff';
@@ -2010,9 +2049,8 @@ function drawTopView(tidx, truck){
         ctx.setLineDash([]);
         ctx.fillStyle='rgba(255,255,255,.8)';
         ctx.font='bold 9px sans-serif';
-        ctx.fillText(liCavities.length>1?'中空#'+(ci+1):'中空區', cavX+4, cavY+11);
+        ctx.fillText(cavityLayouts.length>1?'中空#'+(ci+1):'中空區', cavX+4, cavY+11);
         ctx.restore();
-        cavOffsetX += cavW + 4;
       });
     }
 
@@ -2040,18 +2078,19 @@ function drawTopView(tidx, truck){
 
   cavityItems.forEach(li=>{
     const host = truck.loadedItems.find(h=>h.instanceId===li.cavityHostInstanceId);
-    if(!host || !host.cavity) return;
+    if(!host) return;
+    const layouts = getCavityLayouts(host);
+    const layout = layouts.find(c=>c.idx===li.cavityIdx || c.cavity.id===li.cavityId) || layouts[0];
+    if(!layout) return;
     const color=getColor(li.item.code);
     const hostX=offX+host.x*scale;
-    const hostW=host.item.l*scale;
     const hostY=offY+host.y*scale;
-    const hostH=host.w*scale;
-    const cavX = hostX + Math.max(2, ((host.item.l - host.cavity.l) * scale) / 2);
-    const cavY = hostY + Math.max(2, ((host.item.w - host.cavity.w) * scale) / 2);
+    const cavX = hostX + layout.xOffset * scale;
+    const cavY = hostY + layout.yOffset * scale;
     const ix = cavX + li.cavityX*scale;
     const iw = li.l*scale;
-    const ih = li.item.w*scale;
-    const iy = cavY + ((host.cavity.w - li.w) * scale) / 2;
+    const ih = li.w*scale;
+    const iy = cavY + ((layout.w - li.w) * scale) / 2;
     ctx.fillStyle=color;
     ctx.fillRect(ix,iy,iw,ih);
     ctx.strokeStyle='#111';
@@ -2114,16 +2153,14 @@ function drawSideView(tidx, truck){
     if(li.stackCount>1){
       for(let s=1;s<li.stackCount;s++){ const lineY=baseY-floorH-(li.item.h+s*li.item.stackDelta)*scale; ctx.save();ctx.setLineDash([3,2]);ctx.strokeStyle='rgba(255,255,255,0.5)';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(ix,lineY);ctx.lineTo(ix+drawIW,lineY);ctx.stroke();ctx.setLineDash([]);ctx.restore(); }
     }
-    const liCavsSide = li.cavities || (li.cavity ? [li.cavity] : []);
-    if(liCavsSide.length){
-      let cavSideOff = 0;
-      liCavsSide.forEach((cav, ci)=>{
-        const cavW = Math.max(10, cav.l*scale);
-        const cavH = Math.max(10, cav.h*scale);
-        const cavX = ix + Math.max(2, ((li.item.l - cav.l) * scale) / 2) + cavSideOff;
-        const cavY = iy + Math.max(2, ((stackedH - cav.h) * scale) / 2);
-        ctx.save();ctx.setLineDash([5,3]);ctx.strokeStyle='#ffffff';ctx.lineWidth=1.5;ctx.strokeRect(cavX,cavY,cavW,cavH);ctx.setLineDash([]);ctx.fillStyle='rgba(255,255,255,.8)';ctx.font='bold 9px sans-serif';ctx.fillText(liCavsSide.length>1?'#'+(ci+1):'中空區', cavX+4, cavY+11);ctx.restore();
-        cavSideOff += cavW + 4;
+    const cavityLayoutsSide = getCavityLayouts(li);
+    if(cavityLayoutsSide.length){
+      cavityLayoutsSide.forEach((layout, ci)=>{
+        const cavW = Math.max(10, layout.l*scale);
+        const cavH = Math.max(10, layout.h*scale);
+        const cavX = ix + layout.xOffset * scale;
+        const cavY = iy + Math.max(2, ((stackedH - layout.h) * scale) / 2);
+        ctx.save();ctx.setLineDash([5,3]);ctx.strokeStyle='#ffffff';ctx.lineWidth=1.5;ctx.strokeRect(cavX,cavY,cavW,cavH);ctx.setLineDash([]);ctx.fillStyle='rgba(255,255,255,.8)';ctx.font='bold 9px sans-serif';ctx.fillText(cavityLayoutsSide.length>1?'#'+(ci+1):'中空區', cavX+4, cavY+11);ctx.restore();
       });
     }
     if(isOverH){ const overPx=(stackedH-v.h)*scale; ctx.save();ctx.setLineDash([4,3]);ctx.strokeStyle='#3498db';ctx.lineWidth=2;ctx.strokeRect(ix,limitY-overPx,drawIW,overPx);ctx.setLineDash([]);ctx.fillStyle='#3498db';ctx.font='bold 9px sans-serif';ctx.fillText(`超高+${stackedH-v.h}mm`,ix+2,limitY-overPx/2+3);ctx.restore(); }
@@ -2133,19 +2170,21 @@ function drawSideView(tidx, truck){
 
   cavityItems.forEach(li=>{
     const host = truck.loadedItems.find(h=>h.instanceId===li.cavityHostInstanceId);
-    if(!host || !host.cavity) return;
+    if(!host) return;
+    const layouts = getCavityLayouts(host);
+    const layout = layouts.find(c=>c.idx===li.cavityIdx || c.cavity.id===li.cavityId) || layouts[0];
+    if(!layout) return;
     const color=getColor(li.item.code);
     const hostX=offX+host.x*scale;
-    const hostIW=host.l*scale;
     const hostStackH=host.item.h+(host.stackCount-1)*host.item.stackDelta;
     const hostIH=hostStackH*scale;
     const hostY=baseY-floorH-hostIH;
-    const cavX = hostX + Math.max(2, ((host.item.l - host.cavity.l) * scale) / 2);
-    const cavY = hostY + Math.max(2, ((hostStackH - host.cavity.h) * scale) / 2);
+    const cavX = hostX + layout.xOffset * scale;
+    const cavY = hostY + Math.max(2, ((hostStackH - layout.h) * scale) / 2);
     const ix = cavX + li.cavityX*scale;
-    const iw = li.item.l*scale;
+    const iw = li.l*scale;
     const ih = li.item.h*scale;
-    const iy = cavY + ((host.cavity.h - li.item.h) * scale) / 2;
+    const iy = cavY + ((layout.h - li.item.h) * scale) / 2;
     ctx.fillStyle=color;ctx.fillRect(ix,iy,iw,ih);ctx.strokeStyle='#111';ctx.lineWidth=1.2;ctx.strokeRect(ix,iy,iw,ih);
     ctx.fillStyle='#111';ctx.font='bold 9px sans-serif';ctx.textAlign='center';ctx.fillText(li.item.code,ix+iw/2,iy+ih/2+3);ctx.textAlign='left';
   });
